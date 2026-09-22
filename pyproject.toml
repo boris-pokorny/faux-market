@@ -1,0 +1,62 @@
+[project]
+name = "faux-market"
+version = "0.1.0"
+description = "A lightweight financial-market generator."
+readme = "README.md"
+authors = [{ name = "boris" }]
+requires-python = ">=3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = []
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+[tool.pdm]
+distribution = true
+
+[tool.pdm.build]
+package-dir = "src"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.13",
+    "mypy>=1.18",
+    "pytest>=8.4",
+    "pre-commit>=4.3",
+]
+
+[tool.pdm.scripts]
+lint = { composite = ["ruff check .", "ruff format --check ."] }
+fmt = { composite = ["ruff check --fix .", "ruff format ."] }
+typecheck = "mypy"
+test = "pytest"
+example = "python examples/basic.py"
+
+[tool.ruff]
+line-length = 80
+target-version = "py314"
+src = ["src", "tests", "examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "D", "UP", "B", "N", "ANN", "SIM"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["faux_market"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "ANN"]
+
+[tool.mypy]
+strict = true
+python_version = "3.14"
+files = ["src", "tests", "examples"]
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
