@@ -21,4 +21,5 @@ pdm run lint        # ruff
 pdm run typecheck   # mypy --strict
 pdm run test        # pytest
 pdm run example     # examples/basic.py
+pdm run facts       # examples/stylized_facts.py
 ```

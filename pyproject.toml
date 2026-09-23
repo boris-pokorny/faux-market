@@ -33,6 +33,7 @@ fmt = { composite = ["ruff check --fix .", "ruff format ."] }
 typecheck = "mypy"
 test = "pytest"
 example = "python examples/basic.py"
+facts = "python examples/stylized_facts.py"
 
 [tool.ruff]
 line-length = 80
