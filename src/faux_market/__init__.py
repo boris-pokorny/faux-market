@@ -10,9 +10,11 @@ from faux_market.order_flow import (
     Intent,
     Limit,
     Market,
+    Modify,
     OrderFlow,
 )
 from faux_market.simulation import Simulation
+from faux_market.splitting import OrderSplitting
 from faux_market.zi import ZeroIntelligence
 
 __all__ = [
@@ -25,7 +27,9 @@ __all__ = [
     "L3Event",
     "Limit",
     "Market",
+    "Modify",
     "OrderFlow",
+    "OrderSplitting",
     "Order",
     "Side",
     "Simulation",

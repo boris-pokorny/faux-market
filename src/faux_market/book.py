@@ -1,8 +1,8 @@
 """Limit order book with price-time priority."""
 
-from collections import deque
+from collections import OrderedDict
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from faux_market.events import Side
 
@@ -35,7 +35,7 @@ class Order:
 
 @dataclass(frozen=True, slots=True)
 class Fill:
-    """A resting order (partially) executed by a market order.
+    """A resting order (partially) executed by an incoming order.
 
     Attributes:
         order: The resting order after the fill (``size`` already reduced).
@@ -44,6 +44,14 @@ class Fill:
 
     order: Order
     size: int
+
+
+@dataclass(slots=True)
+class _Level:
+    """FIFO queue at one price and its total size."""
+
+    orders: OrderedDict[int, Order] = field(default_factory=OrderedDict)
+    size: int = 0
 
 
 class Book:
@@ -58,7 +66,7 @@ class Book:
     def __init__(self) -> None:
         """Create an empty book."""
         self.last_trade: int | None = None
-        self._levels: dict[Side, dict[int, deque[Order]]] = {
+        self._levels: dict[Side, dict[int, _Level]] = {
             Side.BID: {},
             Side.ASK: {},
         }
@@ -114,9 +122,21 @@ class Book:
     def depth(self, side: Side) -> dict[int, int]:
         """Total resting size per price level on ``side``."""
         return {
-            price: sum(o.size for o in queue)
-            for price, queue in self._levels[side].items()
+            price: level.size for price, level in self._levels[side].items()
         }
+
+    def level_size(self, side: Side, price: int) -> int:
+        """Total resting size at ``price``; zero if the level is empty."""
+        level = self._levels[side].get(price)
+        return 0 if level is None else level.size
+
+    def order(self, order_id: int) -> Order:
+        """The resting order ``order_id``; treat it as read-only.
+
+        Raises:
+            KeyError: If no such order is resting.
+        """
+        return self._orders[order_id]
 
     def add(self, order: Order) -> None:
         """Rest ``order`` in the book.
@@ -132,13 +152,55 @@ class Book:
             crosses = self.best_bid is not None and order.price <= self.best_bid
         if crosses:
             raise ValueError("limit order would cross the book")
-        self._levels[order.side].setdefault(order.price, deque()).append(order)
+        levels = self._levels[order.side]
+        level = levels.get(order.price)
+        if level is None:
+            level = levels[order.price] = _Level()
+        level.orders[order.order_id] = order
+        level.size += order.size
         self._orders[order.order_id] = order
         self._pos[order.order_id] = len(self._ids)
         self._ids.append(order.order_id)
         best = self._best[order.side]
         if best is None or self._better(order.side, order.price, best):
             self._best[order.side] = order.price
+
+    def submit(self, order: Order) -> list[Fill]:
+        """Execute ``order`` up to its limit, then rest any remainder.
+
+        Args:
+            order: The incoming order; ``size`` is reduced by its fills.
+
+        Returns:
+            Fills of the resting orders, in execution order.
+
+        Raises:
+            ValueError: If the order id is taken.
+        """
+        if order.order_id in self._orders:
+            raise ValueError(f"duplicate order id {order.order_id}")
+        hit = Side.ASK if order.side is Side.BID else Side.BID
+        best = self._best[hit]
+        fills: list[Fill] = []
+        if best is not None and not self._better(hit, order.price, best):
+            fills = self.match(hit, order.size, limit=order.price)
+            order.size -= sum(f.size for f in fills)
+        if order.size > 0:
+            self.add(order)
+        return fills
+
+    def reduce(self, order_id: int, size: int) -> None:
+        """Lower the order's remaining size to ``size``, keeping its priority.
+
+        Raises:
+            KeyError: If no such order is resting.
+            ValueError: Unless ``0 < size`` < the remaining size.
+        """
+        order = self._orders[order_id]
+        if not 0 < size < order.size:
+            raise ValueError(f"cannot reduce {order.size} to {size}")
+        self._levels[order.side][order.price].size -= order.size - size
+        order.size = size
 
     def cancel(self, order_id: int) -> Order:
         """Remove and return the resting order ``order_id``.
@@ -150,15 +212,18 @@ class Book:
         self._forget(order)
         return order
 
-    def match(self, side: Side, size: int) -> list[Fill]:
-        """Execute a market order of ``size`` against the ``side`` queue.
+    def match(
+        self, side: Side, size: int, limit: int | None = None
+    ) -> list[Fill]:
+        """Execute an incoming ``size`` against the ``side`` queue.
 
-        Fills walk from the best price outward until ``size`` is exhausted or
-        the side is empty.
+        Fills walk from the best price outward until ``size`` is exhausted,
+        the side is empty or the best price is worse than ``limit``.
 
         Args:
             side: Side of the resting orders being hit.
             size: Quantity to execute.
+            limit: Worst price to trade at; ``None`` means any.
 
         Returns:
             Fills in execution order.
@@ -173,10 +238,13 @@ class Book:
             best = self.best_bid if side is Side.BID else self.best_ask
             if best is None:
                 break
-            queue = self._levels[side][best]
-            order = queue[0]
+            if limit is not None and self._better(side, limit, best):
+                break
+            level = self._levels[side][best]
+            order = next(iter(level.orders.values()))
             filled = min(size, order.size)
             order.size -= filled
+            level.size -= filled
             size -= filled
             if order.size == 0:
                 del self._orders[order.order_id]
@@ -188,9 +256,10 @@ class Book:
     def _forget(self, order: Order) -> None:
         """Drop ``order`` from its level and the id list."""
         levels = self._levels[order.side]
-        queue = levels[order.price]
-        queue.remove(order)
-        if not queue:
+        level = levels[order.price]
+        del level.orders[order.order_id]
+        level.size -= order.size
+        if not level.orders:
             del levels[order.price]
             if order.price == self._best[order.side]:
                 self._best[order.side] = self._scan_best(order.side)

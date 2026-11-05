@@ -35,7 +35,7 @@ class Sample:
     depth: dict[int, float] = field(default_factory=dict)
 
 
-def collect(flow: fm.ZeroIntelligence, n_events: int, seed: int) -> Sample:
+def collect(flow: fm.OrderFlow, n_events: int, seed: int) -> Sample:
     """Run ``flow`` for ``n_events`` and record the series in ``Sample``."""
     sim = fm.Simulation(flow, seed=seed)
     book = sim.book
@@ -149,17 +149,26 @@ def print_spread_scaling(seed: int) -> None:
     print("  reading: monotone -> more market orders eat more depth")
 
 
-def print_price_impact(s: Sample) -> None:
+def print_price_impact(zi: Sample, split: Sample) -> None:
     """Fact 5: mid moves more after larger market orders."""
     section("5. Price impact grows with order size", "Smith et al. 2003")
+    print(f"  size decile  {'mean move, ZI':>22s}{'mean move, splitting':>22s}")
+    rows = [impact_by_decile(zi), impact_by_decile(split)]
+    for k in sorted(rows[0]):
+        print(
+            f"  {k * 10:4d}-{k * 10 + 9:<4d}"
+            + "".join(f"{r[k]:22.3f}" if k in r else " " * 22 for r in rows)
+        )
+    print("  reading: increasing in size for both flows")
+
+
+def impact_by_decile(s: Sample) -> dict[int, float]:
+    """Mean signed mid move per size decile."""
     buckets: dict[int, list[float]] = {}
     for o in s.orders:
         moves = buckets.setdefault(min(o.size // 10, 9), [])
         moves.append(o.sign * (o.mid_after - o.mid_before))
-    print("  size decile  mean signed mid move")
-    for k, moves in sorted(buckets.items()):
-        print(f"  {k * 10:4d}-{k * 10 + 9:<4d}  {statistics.fmean(moves):8.3f}")
-    print("  reading: increasing in size (roughly linear here, not concave)")
+    return {k: statistics.fmean(v) for k, v in buckets.items()}
 
 
 def print_fat_tails(dense: Sample, sparse: Sample) -> None:
@@ -186,17 +195,15 @@ def print_no_clustering(s: Sample) -> None:
     print("  reading: lag 1 is the bounce artefact; ~0 by lag 20")
 
 
-def print_no_sign_memory(s: Sample) -> None:
-    """Absent fact: long memory in order signs."""
-    section("8. Long memory of order signs: absent", "Lillo & Farmer 2004")
-    signs = [float(o.sign) for o in s.orders]
-    print(
-        "  order-sign autocorr  "
-        + "  ".join(
-            f"lag {lag}: {autocorr(signs, lag):+.3f}" for lag in (1, 2, 10)
-        )
-    )
-    print("  reading: ~0 at every lag; ZI signs are i.i.d.")
+def print_sign_memory(zi: Sample, split: Sample) -> None:
+    """Fact 8: order signs have long memory once metaorders are split."""
+    section("8. Long memory of order signs", "Lillo & Farmer 2004")
+    print("  order-sign autocorr   lag 1   lag 10  lag 100")
+    for name, s in (("zero intelligence", zi), ("order splitting", split)):
+        signs = [float(o.sign) for o in s.orders]
+        acs = [autocorr(signs, lag) for lag in (1, 10, 100)]
+        print(f"  {name:20s}" + "".join(f"{a:+8.3f}" for a in acs))
+    print("  reading: ZI ~0 at every lag; splitting positive, slow decay")
 
 
 def main() -> None:
@@ -206,18 +213,16 @@ def main() -> None:
     sparse = collect(
         fm.ZeroIntelligence(add_rate=0.3, cancel_rate=0.5), 300_000, seed
     )
+    split = collect(fm.OrderSplitting(), 300_000, seed)
     print_depth_profile(dense)
     print_mean_reversion(dense)
     print_bid_ask_bounce(dense)
     print_spread_scaling(seed)
-    print_price_impact(dense)
+    print_price_impact(dense, split)
     print_fat_tails(dense, sparse)
     print_no_clustering(dense)
-    print_no_sign_memory(dense)
-    print(
-        "\nFacts 7 and 8 need strategic or heterogeneous agents,"
-        " which zero intelligence lacks."
-    )
+    print_sign_memory(dense, split)
+    print("\nFact 7 needs feedback from volatility to order flow.")
 
 
 if __name__ == "__main__":

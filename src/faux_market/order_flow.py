@@ -5,9 +5,18 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from faux_market.book import Order
 from faux_market.events import Side
 
-__all__ = ["BookView", "Cancel", "Intent", "Limit", "Market", "OrderFlow"]
+__all__ = [
+    "BookView",
+    "Cancel",
+    "Intent",
+    "Limit",
+    "Market",
+    "Modify",
+    "OrderFlow",
+]
 
 
 class BookView(Protocol):
@@ -51,6 +60,14 @@ class BookView(Protocol):
         """Total resting size per price level on ``side``."""
         ...
 
+    def level_size(self, side: Side, price: int) -> int:
+        """Total resting size at ``price``; zero if the level is empty."""
+        ...
+
+    def order(self, order_id: int) -> Order:
+        """The resting order ``order_id``; treat it as read-only."""
+        ...
+
     def __len__(self) -> int:
         """Number of resting orders."""
         ...
@@ -62,7 +79,7 @@ class BookView(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class Limit:
-    """Rest a limit order.
+    """Place a limit order; any part that crosses executes, the rest rests.
 
     Attributes:
         side: Book side.
@@ -90,6 +107,28 @@ class Cancel:
 
 
 @dataclass(frozen=True, slots=True)
+class Modify:
+    """Change a resting order; a new price or larger size loses priority.
+
+    Attributes:
+        order_id: Identifier of the resting order; it keeps this id.
+        price: New limit price in ticks; must be positive.
+        size: New remaining quantity; must be positive.
+    """
+
+    order_id: int
+    price: int
+    size: int
+
+    def __post_init__(self) -> None:
+        """Validate price and size."""
+        if self.price <= 0:
+            raise ValueError(f"price must be positive, got {self.price}")
+        if self.size <= 0:
+            raise ValueError(f"size must be positive, got {self.size}")
+
+
+@dataclass(frozen=True, slots=True)
 class Market:
     """Send a market order of positive ``size`` on ``side``."""
 
@@ -102,7 +141,7 @@ class Market:
             raise ValueError(f"size must be positive, got {self.size}")
 
 
-type Intent = Limit | Cancel | Market
+type Intent = Limit | Cancel | Modify | Market
 
 
 class OrderFlow(Protocol):

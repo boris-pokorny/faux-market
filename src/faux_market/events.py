@@ -18,6 +18,7 @@ class Action(enum.StrEnum):
 
     ADD = "add"
     CANCEL = "cancel"
+    REDUCE = "reduce"
     EXECUTE = "execute"
 
 
@@ -29,9 +30,10 @@ class L3Event:
         ts: Event time in seconds since simulation start.
         order_id: Identifier of the affected order.
         side: Book side of the order.
-        action: Add, cancel or execute.
+        action: Add, cancel, reduce or execute. Only ``CANCEL`` and a full
+            ``EXECUTE`` remove the order; ``REDUCE`` keeps its priority.
         price: Limit price of the order.
-        size: Quantity added, cancelled or executed.
+        size: Quantity added, cancelled, removed by a reduce or executed.
     """
 
     ts: float

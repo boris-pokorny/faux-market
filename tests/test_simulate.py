@@ -1,11 +1,36 @@
+import contextlib
 import random
 import statistics
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 import pytest
 
 import faux_market as fm
+
+BID, ASK = fm.Side.BID, fm.Side.ASK
+ADD, CANCEL = fm.Action.ADD, fm.Action.CANCEL
+REDUCE, EXECUTE = fm.Action.REDUCE, fm.Action.EXECUTE
+
+
+def replay(events: Iterable[fm.L3Event]) -> dict[int, int]:
+    """Check events against the orders so far; return remaining sizes."""
+    live: dict[int, int] = {}
+    for ev in events:
+        assert ev.price > 0 and ev.size > 0
+        if ev.action is ADD:
+            assert ev.order_id not in live
+            live[ev.order_id] = ev.size
+        elif ev.action is CANCEL:
+            assert live.pop(ev.order_id) == ev.size
+        else:
+            live[ev.order_id] -= ev.size
+            assert live[ev.order_id] > 0 or (
+                live[ev.order_id] == 0 and ev.action is EXECUTE
+            )
+            if live[ev.order_id] == 0:
+                del live[ev.order_id]
+    return live
 
 
 def test_count() -> None:
@@ -17,20 +42,9 @@ def test_deterministic() -> None:
 
 
 def test_event_invariants() -> None:
-    live: dict[int, int] = {}
-    last_ts = 0.0
-    for ev in fm.simulate(5000, seed=3):
-        assert ev.ts >= last_ts
-        assert ev.price > 0 and ev.size > 0
-        if ev.action is fm.Action.ADD:
-            assert ev.order_id not in live
-            live[ev.order_id] = ev.size
-        elif ev.action is fm.Action.CANCEL:
-            assert live.pop(ev.order_id) == ev.size
-        else:
-            live[ev.order_id] -= ev.size
-            assert live[ev.order_id] >= 0
-        last_ts = ev.ts
+    events = list(fm.simulate(5000, seed=3))
+    assert all(a.ts <= b.ts for a, b in zip(events, events[1:], strict=False))
+    replay(events)
 
 
 def test_book_never_crosses_and_mid_moves() -> None:
@@ -77,6 +91,144 @@ def test_custom_model() -> None:
     ]
     execute = fm.L3Event(2.0, 2, fm.Side.BID, fm.Action.EXECUTE, 99.0, 2)
     assert events[2] == execute
+
+
+class FlowEndedError(Exception):
+    pass
+
+
+def drain(sim: fm.Simulation) -> list[fm.L3Event]:
+    """All events up to the end of a finite flow."""
+    events = []
+    with contextlib.suppress(FlowEndedError):
+        for ev in sim:
+            events.append(ev)
+    return events
+
+
+class Scripted:
+    """Seeds ``warm`` (ids from 1), then plays ``intents``."""
+
+    def __init__(self, warm: list[fm.Limit], intents: list[fm.Intent]) -> None:
+        self._warm = warm
+        self._intents = iter(intents)
+
+    def warm_up(self, ref: int, rng: random.Random) -> list[fm.Limit]:
+        return self._warm
+
+    def step(
+        self, book: fm.BookView, rng: random.Random
+    ) -> tuple[float, fm.Intent]:
+        for intent in self._intents:
+            return 1.0, intent
+        raise FlowEndedError
+
+
+TWO_BIDS = [fm.Limit(BID, 99, 5), fm.Limit(BID, 99, 5)]
+HIT_BID = fm.Market(ASK, 1)
+
+
+@pytest.mark.parametrize(
+    ("warm", "intents", "expected"),
+    [
+        pytest.param(
+            [fm.Limit(ASK, 101, 3), fm.Limit(ASK, 102, 3)],
+            [fm.Limit(BID, 101, 5)],
+            [(EXECUTE, 1, 101.0, 3), (ADD, 3, 101.0, 2)],
+            id="crossing-limit-rests-remainder",
+        ),
+        pytest.param(
+            [fm.Limit(ASK, 101, 5)],
+            [fm.Limit(BID, 101, 2)],
+            [(EXECUTE, 1, 101.0, 2)],
+            id="filled-limit-emits-no-add",
+        ),
+        pytest.param(
+            TWO_BIDS,
+            [fm.Modify(1, 99, 5), HIT_BID],
+            [(EXECUTE, 1, 99.0, 1)],
+            id="unchanged-is-silent-keeps-priority",
+        ),
+        pytest.param(
+            TWO_BIDS,
+            [fm.Modify(1, 99, 2), HIT_BID],
+            [(REDUCE, 1, 99.0, 3), (EXECUTE, 1, 99.0, 1)],
+            id="smaller-keeps-priority",
+        ),
+        pytest.param(
+            TWO_BIDS,
+            [fm.Modify(1, 99, 6), HIT_BID],
+            [(CANCEL, 1, 99.0, 5), (ADD, 1, 99.0, 6), (EXECUTE, 2, 99.0, 1)],
+            id="larger-loses-priority",
+        ),
+        pytest.param(
+            TWO_BIDS,
+            [fm.Modify(1, 98, 2)],
+            [(CANCEL, 1, 99.0, 5), (ADD, 1, 98.0, 2)],
+            id="new-price-replaces",
+        ),
+        pytest.param(
+            [fm.Limit(BID, 99, 5), fm.Limit(ASK, 101, 2)],
+            [fm.Modify(1, 101, 5)],
+            [(CANCEL, 1, 99.0, 5), (EXECUTE, 2, 101.0, 2), (ADD, 1, 101.0, 3)],
+            id="new-price-crosses",
+        ),
+    ],
+)
+def test_intent_events(
+    warm: list[fm.Limit],
+    intents: list[fm.Intent],
+    expected: list[tuple[fm.Action, int, float, int]],
+) -> None:
+    sim = fm.Simulation(Scripted(warm, intents), tick=1.0)
+    events = [(e.action, e.order_id, e.price, e.size) for e in drain(sim)]
+    assert events[len(warm) :] == expected
+
+
+def test_crossing_limit_events_share_a_timestamp() -> None:
+    flow = Scripted([fm.Limit(ASK, 101, 3)], [fm.Limit(BID, 101, 5)])
+    events = drain(fm.Simulation(flow, tick=1.0))
+    assert [e.ts for e in events] == [0.0, 1.0, 1.0]
+
+
+class EveryIntent:
+    """Random limits (often crossing), cancels, modifies and markets."""
+
+    def __init__(self, steps: int) -> None:
+        self._steps = steps
+
+    def warm_up(self, ref: int, rng: random.Random) -> list[fm.Limit]:
+        return [fm.Limit(BID, ref - 1, 5), fm.Limit(ASK, ref + 1, 5)]
+
+    def step(
+        self, book: fm.BookView, rng: random.Random
+    ) -> tuple[float, fm.Intent]:
+        assert book.spread is None or book.spread > 0
+        if self._steps == 0:
+            raise FlowEndedError
+        self._steps -= 1
+        ids = book.order_ids
+        side = rng.choice((BID, ASK))
+        price = 10000 + rng.randint(-5, 5)
+        size = rng.randint(1, 6)
+        u = rng.random()
+        if u < 0.4 or not ids:
+            return 1.0, fm.Limit(side, price, size)
+        if u < 0.5:
+            return 1.0, fm.Cancel(rng.choice(ids))
+        if u < 0.6:
+            return 1.0, fm.Market(side, size)
+        order = book.order(rng.choice(ids))
+        new_price = rng.choice((price, order.price))
+        return 1.0, fm.Modify(order.order_id, new_price, size)
+
+
+def test_events_rebuild_the_book_under_every_intent() -> None:
+    sim = fm.Simulation(EveryIntent(5000), seed=4)
+    events = drain(sim)
+    assert {e.action for e in events} == set(fm.Action)
+    book = sim.book
+    assert replay(events) == {i: book.order(i).size for i in book.order_ids}
 
 
 def test_run_resumes_without_dropping_events() -> None:
@@ -128,6 +280,10 @@ def test_intents_reject_non_positive_values() -> None:
         fm.Limit(fm.Side.BID, 1, 0)
     with pytest.raises(ValueError):
         fm.Market(fm.Side.ASK, 0)
+    with pytest.raises(ValueError):
+        fm.Modify(1, 0, 1)
+    with pytest.raises(ValueError):
+        fm.Modify(1, 1, 0)
 
 
 def test_simulate_passes_through_order_flow_and_prices() -> None:

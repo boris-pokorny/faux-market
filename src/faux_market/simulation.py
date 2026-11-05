@@ -11,7 +11,14 @@ from itertools import islice
 
 from faux_market.book import Book, Order
 from faux_market.events import Action, L3Event, Side
-from faux_market.order_flow import Cancel, Intent, Limit, Market, OrderFlow
+from faux_market.order_flow import (
+    Cancel,
+    Intent,
+    Limit,
+    Market,
+    Modify,
+    OrderFlow,
+)
 
 __all__ = ["Simulation"]
 
@@ -82,11 +89,12 @@ class Simulation:
             case Limit(side, price, size):
                 order = Order(self._next_id, side, price, size)
                 self._next_id += 1
-                self.book.add(order)
-                return [self._event(order, Action.ADD, size)]
+                return self._submit(order)
             case Cancel(order_id):
                 order = self.book.cancel(order_id)
                 return [self._event(order, Action.CANCEL, order.size)]
+            case Modify(order_id, price, size):
+                return self._modify(order_id, price, size)
             case Market(side, size):
                 # A market buy hits the asks; its fills are ask-side executes.
                 hit = Side.ASK if side is Side.BID else Side.BID
@@ -94,6 +102,29 @@ class Simulation:
                     self._event(f.order, Action.EXECUTE, f.size)
                     for f in self.book.match(hit, size)
                 ]
+
+    def _submit(self, order: Order) -> list[L3Event]:
+        events = [
+            self._event(f.order, Action.EXECUTE, f.size)
+            for f in self.book.submit(order)
+        ]
+        if order.size > 0:
+            events.append(self._event(order, Action.ADD, order.size))
+        return events
+
+    def _modify(self, order_id: int, price: int, size: int) -> list[L3Event]:
+        order = self.book.order(order_id)
+        if price == order.price:
+            if size == order.size:
+                return []
+            if size < order.size:
+                removed = order.size - size
+                self.book.reduce(order_id, size)
+                return [self._event(order, Action.REDUCE, removed)]
+        self.book.cancel(order_id)
+        cancelled = self._event(order, Action.CANCEL, order.size)
+        replacement = Order(order_id, order.side, price, size)
+        return [cancelled, *self._submit(replacement)]
 
     def _event(self, order: Order, action: Action, size: int) -> L3Event:
         return L3Event(
