@@ -266,6 +266,11 @@ def test_zero_intelligence_rejects_bad_config(kwargs: dict[str, Any]) -> None:
         fm.ZeroIntelligence(**kwargs)
 
 
+@pytest.mark.parametrize("mid", [0.001, 0.1, 0.2, 0.21, 0.25, 0.3])
+def test_low_mid_prices_stay_positive(mid: float) -> None:
+    replay(fm.simulate(20000, seed=0, mid=mid))
+
+
 def test_simulation_rejects_bad_prices() -> None:
     with pytest.raises(ValueError):
         fm.Simulation(fm.ZeroIntelligence(), tick=0.0)

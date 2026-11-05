@@ -61,7 +61,7 @@ class ZeroIntelligence:
         """One order per tick on each side, ``window`` ticks deep."""
         self._ref = ref
         for k in range(1, self._window + 1):
-            yield Limit(Side.BID, ref - k, self._size(rng))
+            yield Limit(Side.BID, max(ref - k, 1), self._size(rng))
             yield Limit(Side.ASK, ref + k, self._size(rng))
 
     def step(self, book: BookView, rng: random.Random) -> tuple[float, Intent]:
@@ -82,14 +82,14 @@ class ZeroIntelligence:
         """Price ``k`` ticks inside the opposite best quote.
 
         Falls back to the last trade (or initial reference) when the
-        opposite side is empty.
+        opposite side is empty. Floored at one tick.
         """
         ref = book.last_trade if book.last_trade is not None else self._ref
         if side is Side.BID:
             ask = book.best_ask
-            return (ask if ask is not None else ref + 1) - k
+            return max((ask if ask is not None else ref + 1) - k, 1)
         bid = book.best_bid
-        return (bid if bid is not None else ref - 1) + k
+        return max((bid if bid is not None else ref - 1) + k, 1)
 
     def _size(self, rng: random.Random) -> int:
         return rng.randint(1, self._max_size)
